@@ -1,16 +1,20 @@
-""" A queue example with GI inter-arrival times and exponential service times.
+# Copyright 2014 Dr. Greg M. Bernstein
+""" Simulation model for an M/M/1 queue based on SimPy. Estimates queue sizes and
+    wait times and compares to theory.  Vary number of packets sent, inter-arrival
+    and service time via parameters in the main portion of the script.
 
-    For more information and formulas for moments see: https://en.wikipedia.org/wiki/Weibull_distribution
+    Our model is based on processes for packet generation and consumption, along
+    with a SimPy Store resource to model the FIFO output queue of a packet
+    switching port.
 
-    Since we are using a GI distribution for arrival times we cannot assume the PASTA principle (Poisson
-    arrivals See Time Averages) hence we set up a separate queue monitoring process to watch how the
-    packet queue size varies over time and to compute the average queue size.
+    This code uses global (module) level variables and hence is not very extensible, nor
+    an example of good OO design.
 """
 import random
 import simpy
-import math
 import matplotlib.pyplot as plt
 
+k = 20
 
 class Packet(object):
     """ A very simple class that represents a packet.
@@ -33,26 +37,28 @@ class Packet(object):
         self.dst = dst
 
 
-def packet_generator(env, out_pipe):
-    """ A generator function for endlessly creating packets.
-        Generates packets with exponentially varying inter-arrival times and
-        placing them in an output queue.
+def packet_generator(numPackets, env, out_pipe):
+    """A generator function for creating packets.
+         Generates packets with exponentially varying inter-arrival times and
+         placing them in an output queue.
 
-        Parameters
-        ----------
+         Parameters
+         ----------
+        numPackets : int
+            number of packets to send.
         env : simpy.Environment
             The simulation environment.
         out_pipe : simpy.Store
             the output queue model object.
     """
-    global packets_sent
-    while True:
+    global queue_size
+    for i in range(numPackets):
         # wait for next transmission
-        yield env.timeout(random.weibullvariate(WSCALE, SHAPE))
-        # yield env.timeout(random.expovariate(1.0/ARRIVAL))
+        yield env.timeout(random.expovariate(1.0 / (ARRIVAL*k)))
         # print "Sending packet {} at time {}".format(i, env.now)
-        packets_sent += 1
-        p = Packet(env.now, packets_sent)
+        p = Packet(env.now, i)
+        # Measuring queue statistics here is only valid for Poisson arrivals.
+        queue_size += len(out_pipe.items)
         yield out_pipe.put(p)
 
 
@@ -61,15 +67,14 @@ def packet_consumer(env, in_pipe):
         Consumes packets from the packet queue, i.e., models sending a packet of exponentially
         varying size over a link.
 
-        Parameters
-        ----------
-        env : simpy.Environment
-            the simulation environment.
-        in_pipe : simpy.Store
-            the FIFO model object where packets are kept.
+    Parameters
+    ----------
+    env : simpy.Environment
+        the simulation environment.
+    in_pipe : simpy.Store
+        the FIFO model object where packets are kept.
     """
     global queue_wait, total_wait
-
     while True:
         # Get event for message pipe
         msg = yield in_pipe.get()
@@ -78,65 +83,74 @@ def packet_consumer(env, in_pipe):
         total_wait += env.now - msg.time
         # print "at time {} processed packet: {} ".format(env.now, msg.id)
 
-
-def queue_monitor(env, out_pipe):
-    """ A generator function for monitoring a packet queue.
-
-        Parameters
-        ----------
-        env : simpy.Environment
-            the simulation environment.
-        out_pipe : simpy.Store
-            the FIFO model object whose queue is to be monitored.
-    """
-    global queue_size, queue_occupancy
-    while True:
-        yield env.timeout(1.0)
-        queue_size += len(out_pipe.items)
-        queue_occupancy.append(len(out_pipe.items))
-        # print "Time = {}".format(env.now)
+# def queue_monitor(env, out_pipe):
+#     """ A generator function for monitoring a packet queue.
+#
+#         Parameters
+#         ----------
+#         env : simpy.Environment
+#             the simulation environment.
+#         out_pipe : simpy.Store
+#             the FIFO model object whose queue is to be monitored.
+#     """
+#     global queue_size, queue_occupancy
+#     while True:
+#         yield env.timeout(1.0)
+#         queue_size += len(out_pipe.items)
+#         queue_occupancy.append(len(out_pipe.items))
+#         # print "Time = {}".format(env.now)
 
 
 if __name__ == '__main__':
-    SHAPE = 2
+    ## The number of packets to be sent over the life of the simulation.
+    NUM_PACKETS = 10000
+    ## The mean inter-arrival time
     ARRIVAL = 5
+    ## The mean service time
     SERVICE = 4
-    # The G1 scale parameter computed based on the shape and average inter-arrival time.
-    WSCALE = ARRIVAL / math.gamma(1.0 + 1.0 / SHAPE)
 
+    ## To compute the average queue waiting time
     queue_wait = 0
+    ## To compute the average total waiting time
     total_wait = 0
+    ## To compute the average queue size.
     queue_size = 0
-    packets_sent = 0
+
     queue_occupancy = []
 
+
     # Setup and start the simulation
+    ## The simulation environment.
     env = simpy.Environment()
+    ## The switch output port object based on the SimPy Store class
     pipe = simpy.Store(env)
-    env.process(queue_monitor(env, pipe))
-    env.process(packet_generator(env, pipe))
+    # Turns our generator functions into SimPy Processes
+    # env.process(queue_monitor(env, pipe))
+    env.process(packet_generator(NUM_PACKETS, env, pipe))
     env.process(packet_consumer(env, pipe))
-    print('A GI/M/1 queueing simulation')
-    env.run(until=1.0e5)
+    print('A simple M/M/1 queueing simulation')
+    env.run() # until=1.0e5
 
     print("Ending simulation time: {}".format(env.now))
-    print("Packets sent: {}".format(packets_sent))
     # Formulas from Klienrock, "Queueing Systems, Volume I:Theory", 1975.
     mu = 1.0 / SERVICE
     l = 1.0 / ARRIVAL
     rho = l / mu
-    W = rho / mu / (1 - rho)  # average weight in the queue
+    W = rho / mu / (1 - rho)  # average wait in the queue
     T = 1 / mu / (1 - rho)  # average total system time.
     nq_bar = rho / (1.0 - rho) - rho  # The average number waiting in the queue
-    print("M/M/1 Theory: avg queue wait {}, avg total time {}, avg queue size {}".format(W, T, nq_bar))
-    print('Sim Average queue wait = {}'.format(queue_wait / packets_sent))
-    print('Sim Average total wait = {}'.format(total_wait / packets_sent))
-    print('Sim Average queue size = {}'.format(queue_size / env.now))
-    fig, axis = plt.subplots()
-    axis.hist(queue_occupancy, bins=100, density=True)
-    axis.set_title(r"Histogram of a GI process output queue")
-    axis.set_xlabel("x")
-    axis.set_ylabel("normalized frequency of occurrence")
-    axis.set_xlim([0, 25])
-    # fig.savefig("GIQueueHistogram.png")
-    plt.show()
+    print("Theory: avg queue wait {}, avg total time {}, avg queue size {}".format(W, T, nq_bar))
+    print('Sim Average queue wait = {}'.format(queue_wait / NUM_PACKETS))
+    print('Sim Average total wait = {}'.format(total_wait / NUM_PACKETS))
+    print('Sim Average queue size = {}'.format(queue_size / float(NUM_PACKETS)))
+    print('Sim Average system size = {}'.format(total_wait*l/NUM_PACKETS))
+    # print(queue_occupancy)
+    # fig, axis = plt.subplots()
+    # axis.hist(queue_occupancy, bins=100, density=True)
+    # axis.set_title(r"Histogram of an MM1 process output queue")
+    # axis.set_xlabel("x")
+    # axis.set_ylabel("normalized frequency of occurrence")
+    # axis.set_xlim([0, 25])
+    # fig.savefig("MM1QueueHistogram.png")
+    # plt.show()
+
